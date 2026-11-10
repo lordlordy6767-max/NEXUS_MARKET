@@ -6,8 +6,8 @@ from flask import Flask
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "NEXUS MARKET is online!"
-threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
+def home(): return "NEXUS MARKET is online!", 200
+threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000))), daemon=True).start()
 
 OWNER_ID = os.getenv('OWNER_ID', '')
 OWNER_USERNAME = os.getenv('OWNER_USERNAME', '@starrlightz12')
