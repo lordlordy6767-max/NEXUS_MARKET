@@ -34,13 +34,23 @@ def can_use_market(guild_id):
     return False
 
 def market_blocked(interaction, func=None):
-    # Returns error string or None if OK
     if not interaction.guild: return "❌ Use MARKET in a server, not DMs."
     if not can_use_market(interaction.guild.id):
         return f"❌ This bot is private. Only {OWNER_USERNAME}'s servers can use it. Mode: {db.get('mode')}"
     if func and is_locked(func):
         return f"🔒 `{func}` is locked by Owner. DM {OWNER_USERNAME}"
     return None
+
+def listing_embed(lid, item):
+    embed = discord.Embed(title=f"🛒 NEXUS MARKET - {item['item']}", description=item.get('desc') or "No description", color=0xFFD700)
+    embed.add_field(name="Price", value=item['price'], inline=True)
+    embed.add_field(name="Seller", value=f"<@{item['seller']}>", inline=True)
+    embed.add_field(name="ID", value=lid, inline=True)
+    embed.set_footer(text=f"Use /market-buy id:{lid} to buy • Seller rating: {db.get('ratings', {}).get(str(item['seller']), 'No ratings yet')}")
+    # IMAGE SUPPORT
+    if item.get("image"):
+        embed.set_image(url=item["image"])
+    return embed
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -100,19 +110,15 @@ async def market_locks(interaction: discord.Interaction):
 
 # ---------- SELL / BUY ----------
 
-@bot.tree.command(name="market-sell", description="Sell an item")
-async def market_sell(interaction: discord.Interaction, item: str, price: str, description: str = ""):
+@bot.tree.command(name="market-sell", description="Sell an item with photo")
+@app_commands.describe(item="Item name", price="Price", description="Description", image="Upload photo of item")
+async def market_sell(interaction: discord.Interaction, item: str, price: str, description: str = "", image: discord.Attachment = None):
     err = market_blocked(interaction, "sell")
     if err: return await interaction.response.send_message(err, ephemeral=True)
     lid = str(int(time.time()*1000))
-    db["listings"][lid] = {"item": item, "price": price, "desc": description, "seller": str(interaction.user.id), "sellerName": str(interaction.user), "guild": str(interaction.guild.id)}
+    db["listings"][lid] = {"item": item, "price": price, "desc": description, "seller": str(interaction.user.id), "sellerName": str(interaction.user), "guild": str(interaction.guild.id), "image": image.url if image else None}
     save()
-    embed = discord.Embed(title=f"🛒 NEXUS MARKET - {item}", description=description or "No description", color=0xFFD700)
-    embed.add_field(name="Price", value=price, inline=True)
-    embed.add_field(name="Seller", value=interaction.user.mention, inline=True)
-    embed.add_field(name="ID", value=lid, inline=True)
-    embed.set_footer(text=f"Use /market-buy id:{lid} to buy • Seller rating: {db.get('ratings', {}).get(str(interaction.user.id), 'No ratings yet')}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=listing_embed(lid, db["listings"][lid]))
 
 @bot.tree.command(name="market-buy", description="Buy an item by ID")
 async def market_buy(interaction: discord.Interaction, id: str):
@@ -125,14 +131,15 @@ async def market_buy(interaction: discord.Interaction, id: str):
     try: await seller.send(f"🛒 Someone wants your item **{item['item']}** ({item['price']}) in {interaction.guild.name} - Buyer: {interaction.user} - DM them!")
     except: pass
 
-@bot.tree.command(name="market-list", description="See all listings")
+@bot.tree.command(name="market-list", description="See all listings with images")
 async def market_list(interaction: discord.Interaction):
     err = market_blocked(interaction)
     if err: return await interaction.response.send_message(err, ephemeral=True)
-    listings = [v for v in db.get("listings", {}).values() if v["guild"] == str(interaction.guild.id)]
+    listings = [(k, v) for k, v in db.get("listings", {}).items() if v["guild"] == str(interaction.guild.id)]
     if not listings: return await interaction.response.send_message("No listings yet. Use /market-sell to post one!", ephemeral=True)
-    text = "\n".join([f"**{v['item']}** - {v['price']} - <@{v['seller']}> - ID: `{k}`" for k, v in db["listings"].items() if v["guild"] == str(interaction.guild.id)])
-    await interaction.response.send_message(f"🛒 **MARKET LISTINGS:**\n{text}")
+    await interaction.response.send_message(f"🛒 **MARKET LISTINGS:** {len(listings)} items")
+    for lid, v in listings:
+        await interaction.channel.send(embed=listing_embed(lid, v))
 
 @bot.tree.command(name="market-search", description="Search for an item")
 async def market_search(interaction: discord.Interaction, item: str):
@@ -140,8 +147,9 @@ async def market_search(interaction: discord.Interaction, item: str):
     if err: return await interaction.response.send_message(err, ephemeral=True)
     found = [(k, v) for k, v in db.get("listings", {}).items() if item.lower() in v["item"].lower() and v["guild"] == str(interaction.guild.id)]
     if not found: return await interaction.response.send_message(f"No results for `{item}`", ephemeral=True)
-    text = "\n".join([f"**{v['item']}** - {v['price']} - <@{v['seller']}> - ID: `{k}`" for k, v in found])
-    await interaction.response.send_message(f"🔍 Results:\n{text}")
+    await interaction.response.send_message(f"🔍 Results: {len(found)}")
+    for lid, v in found:
+        await interaction.channel.send(embed=listing_embed(lid, v))
 
 @bot.tree.command(name="market-sold", description="Mark item sold - Seller + Owner only")
 async def market_sold(interaction: discord.Interaction, id: str):
@@ -151,7 +159,10 @@ async def market_sold(interaction: discord.Interaction, id: str):
     if not item: return await interaction.response.send_message("❌ Not found", ephemeral=True)
     if str(interaction.user.id) != item["seller"] and not is_owner(interaction.user.id): return await interaction.response.send_message("❌ Only seller or Owner", ephemeral=True)
     db["listings"].pop(id); save()
-    await interaction.response.send_message(f"✅ SOLD! **{item['item']}** for {item['price']} 🎉")
+    embed = discord.Embed(title=f"✅ SOLD! {item['item']} for {item['price']} 🎉", color=0x22C55E)
+    if item.get("image"):
+        embed.set_image(url=item["image"])
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="market-remove", description="Remove listing - Seller + Owner only")
 async def market_remove(interaction: discord.Interaction, id: str):
@@ -162,6 +173,19 @@ async def market_remove(interaction: discord.Interaction, id: str):
     if str(interaction.user.id) != item["seller"] and not is_owner(interaction.user.id): return await interaction.response.send_message("❌ Only seller or Owner", ephemeral=True)
     db["listings"].pop(id); save()
     await interaction.response.send_message(f"✅ Removed **{item['item']}**")
+
+@bot.tree.command(name="market-edit", description="Edit listing - price / description / image")
+async def market_edit(interaction: discord.Interaction, id: str, new_price: str = None, new_description: str = None, new_image: discord.Attachment = None):
+    err = market_blocked(interaction)
+    if err: return await interaction.response.send_message(err, ephemeral=True)
+    item = db.get("listings", {}).get(id)
+    if not item: return await interaction.response.send_message("❌ Not found", ephemeral=True)
+    if str(interaction.user.id) != item["seller"] and not is_owner(interaction.user.id): return await interaction.response.send_message("❌ Only seller or Owner", ephemeral=True)
+    if new_price: item["price"] = new_price
+    if new_description is not None and new_description != "": item["desc"] = new_description
+    if new_image: item["image"] = new_image.url
+    save()
+    await interaction.response.send_message("✅ Updated!", embed=listing_embed(id, item))
 
 @bot.tree.command(name="market-clear", description="Clear ALL listings - Owner only")
 async def market_clear(interaction: discord.Interaction):
@@ -197,7 +221,7 @@ async def market_middleman(interaction: discord.Interaction, buyer: discord.Memb
 @bot.tree.command(name="market-help", description="Show MARKET commands")
 async def market_help(interaction: discord.Interaction):
     embed = discord.Embed(title="🛒 NEXUS MARKET - Commands", description=f"Mode: {db.get('mode')} | Owner: {OWNER_USERNAME}", color=0xFFD700)
-    embed.add_field(name="🛒 Sell / Buy", value="`/market-sell item: Dragon price: 500 description: Rare`\n`/market-buy id: <id>`\n`/market-list`\n`/market-search item: Dragon`\n`/market-sold id: <id>`\n`/market-remove id: <id>`", inline=False)
+    embed.add_field(name="🛒 Sell / Buy", value="`/market-sell item: Dragon price: 500 description: Rare image: [upload]`\n`/market-buy id: <id>`\n`/market-list`\n`/market-search item: Dragon`\n`/market-sold id: <id>`\n`/market-remove id: <id>`\n`/market-edit id: <id> new_price: 600 new_image: [upload]`", inline=False)
     embed.add_field(name="🔍 Wanted / Rate", value="`/market-wanted item: Dragon price: 500`\n`/market-rate user: @user stars: 5`", inline=False)
     embed.add_field(name="🛡️ Middleman", value="`/market-middleman buyer: @x seller: @y item: Dragon price: 500` (Owner)", inline=False)
     embed.add_field(name="🔒 Owner Controls", value="`/market-mode mode: private/public/allowlist`\n`/market-allow server-id: 123`\n`/market-deny server-id: 123`\n`/market-lock function: sell`\n`/market-unlock function: sell`\n`/market-locks`\n`/market-clear`", inline=False)
